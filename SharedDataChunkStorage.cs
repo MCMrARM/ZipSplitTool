@@ -41,10 +41,16 @@ public class DiskDataChunkStorage : ISharedDataChunkStorage, IDisposable
         IncludeFields = true,
     };
 
+    private class IndexFileRef
+    {
+        public string? ContainerPath;
+        public string? FilePath;
+    }
+
     private class IndexFileData
     {
         public long Size;
-        public HashSet<Tuple<string, string>> Refs = new();
+        public HashSet<IndexFileRef> Refs = new();
     }
 
     private class IndexData
@@ -65,7 +71,8 @@ public class DiskDataChunkStorage : ISharedDataChunkStorage, IDisposable
         this.readOnly = readOnly;
         this.chunkDir = chunkDir;
         if (!readOnly)
-            lockFile = new FileStream(Path.Combine(chunkDir, "Lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+            lockFile = new FileStream(Path.Combine(chunkDir, "Lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                FileShare.Read);
     }
 
     private string GetBucketPath(byte[] hash)
@@ -115,7 +122,7 @@ public class DiskDataChunkStorage : ISharedDataChunkStorage, IDisposable
     {
         if (readOnly)
             throw new Exception("opened the chunk storage read-only");
-        
+
         var bucketPath = GetBucketPath(hash);
         var index = OpenIndexForHash(hash);
         var hashString = Convert.ToHexString(hash);
@@ -134,7 +141,7 @@ public class DiskDataChunkStorage : ISharedDataChunkStorage, IDisposable
             AddedCount++;
         }
 
-        index.Files[hashString].Refs.Add(new Tuple<string, string>(containerFileName, fileName));
+        index.Files[hashString].Refs.Add(new IndexFileRef { ContainerPath = containerFileName, FilePath = fileName });
         dirtyIndexFiles.Add(bucketPath);
     }
 
