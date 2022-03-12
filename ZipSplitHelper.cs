@@ -71,11 +71,10 @@ public class ZipSplitHelper
         CopyRawData(stream, writer, stream.Length - stream.Position, true);
     }
 
-    public byte[] RestoreOriginalFile(IReceiptFileReader reader, Stream output, bool useSetLength)
+    public byte[] RestoreOriginalFile(IReceiptFileReader reader, Stream output, Action<long>? setLengthAction)
     {
         var header = reader.ReadHeader();
-        if (useSetLength)
-            output.SetLength(header.FileSize);
+        setLengthAction?.Invoke(header.FileSize);
 
         while (!reader.IsEof())
         {

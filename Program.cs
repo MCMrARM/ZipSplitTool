@@ -8,6 +8,7 @@ const string RepoDirName = "ZipSplitData";
 const string RepoChunkDirName = "Chunks";
 const string ToolFileExt = ".ZipSplit";
 const string ToolFileTmpExt = ".ZipSplit.Tmp";
+const string RestoreOrigTmpExt = ".RestoreTmp";
 const int MinFileSize = 16 * 1024 * 1024;
 
 
@@ -28,16 +29,23 @@ static int Run(string[] args)
         new Argument<string[]>("path", "File paths. Must be part of a repository."),
         new Option("--recursive", "Recursively scans directories"),
     };
+    var checkoutFiles = new Command("checkout", "Restores the original files from ZipSplit files.")
+    {
+        new Argument<string[]>("path", "Paths to ZipSplit files."),
+        new Option("--recursive", "Recursively scans directories"),
+    };
 
     newRepo.Handler = CommandHandler.Create(HandleNewRepo);
     addFiles.Handler = CommandHandler.Create(HandleAddFiles);
     verifyFiles.Handler = CommandHandler.Create(HandleVerifyFiles);
+    checkoutFiles.Handler = CommandHandler.Create(HandleCheckoutFiles);
 
     var cmd = new RootCommand
     {
         newRepo,
         addFiles,
-        verifyFiles
+        verifyFiles,
+        checkoutFiles
     };
     return cmd.Invoke(args);
 }
@@ -189,7 +197,7 @@ static void HandleVerifyFiles(string[] path, bool recursive)
             
             using var sha = SHA256.Create();
             using var stream = new CryptoStream(Stream.Null, sha, CryptoStreamMode.Write);
-            var hash = helper.RestoreOriginalFile(new BinaryReceiptFileReader(receiptFileBinReader), stream, false);
+            var hash = helper.RestoreOriginalFile(new BinaryReceiptFileReader(receiptFileBinReader), stream, null);
             stream.FlushFinalBlock();
             if (sha.Hash!.SequenceEqual(hash))
             {
@@ -216,6 +224,76 @@ static void HandleVerifyFiles(string[] path, bool recursive)
     Console.WriteLine(errors > 0 ? "Errors: " + errors + " files." : "No errors.");
 }
 
+static void HandleCheckoutFiles(string[] path, bool recursive)
+{
+    var allFiles = new List<string>();
+    foreach (string file in path)
+    {
+        if (Directory.Exists(file) && recursive)
+        {
+            var dirFiles = Directory.GetFiles(file, "*" + ToolFileExt, SearchOption.AllDirectories);
+            foreach (var dirFile in dirFiles)
+            {
+                if (!File.Exists(RemoveToolExt(dirFile)))
+                    allFiles.Add(dirFile);
+            }
+        }
+        else
+        {
+            if (File.Exists(RemoveToolExt(file)))
+            {
+                Console.WriteLine("Skipping " + file + " since the " + ToolFileExt +
+                                  " original file for it already exists.");
+                continue;
+            } 
+            allFiles.Add(file);
+        }
+    }
+
+    int i = 0;
+    foreach (string file in allFiles)
+    {
+        Console.WriteLine("[" + (++i) + "/" + allFiles.Count + "] " + file);
+        
+        var repoPath = FindRepository(file);
+        if (repoPath == null)
+        {
+            Console.WriteLine("Skipping " + file + ": Failed to find repository");
+            continue;
+        }
+
+        try
+        {
+            string origFile = RemoveToolExt(file);
+            
+            using var sharedChunkStorage = new DiskDataChunkStorage(Path.Combine(repoPath, RepoChunkDirName), true);
+            var helper = new ZipSplitHelper(sharedChunkStorage);
+            
+            using var receiptFileStream = File.OpenRead(file);
+            using var receiptFileBinReader = new BinaryReader(receiptFileStream);
+            
+            using var fileStream = File.OpenWrite(file + RestoreOrigTmpExt);
+            using var sha = SHA256.Create();
+            using var stream = new CryptoStream(fileStream, sha, CryptoStreamMode.Write);
+            
+            var hash = helper.RestoreOriginalFile(new BinaryReceiptFileReader(receiptFileBinReader), stream, 
+                len => fileStream!.SetLength(len));
+            stream.FlushFinalBlock();
+            
+            if (!sha.Hash!.SequenceEqual(hash))
+                throw new Exception("Hash mismatch, file corrupted");
+
+            File.Move(file + RestoreOrigTmpExt, origFile);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("Error: " + e);
+            if (File.Exists(file + RestoreOrigTmpExt))
+                File.Delete(file + RestoreOrigTmpExt);
+        }
+    }
+}
+
 static string FormatFileSizeGb(long fileSize)
 {
     return (fileSize / 1000000000.0).ToString("F1") + "GB";
@@ -227,6 +305,13 @@ static string? FindRepository(string path)
     while (rpath != null && !Directory.Exists(Path.Combine(rpath, RepoDirName)))
         rpath = Path.GetDirectoryName(rpath);
     return rpath != null ? Path.Combine(rpath, RepoDirName) : null;
+}
+
+static string RemoveToolExt(string filename)
+{
+    if (!filename.EndsWith(ToolFileExt))
+        throw new Exception("filename doesn't end with " + ToolFileExt);
+    return filename.Substring(0, filename.Length - ToolFileExt.Length);
 }
 
 
