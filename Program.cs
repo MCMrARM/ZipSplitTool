@@ -29,6 +29,11 @@ static int Run(string[] args)
         new Argument<string[]>("path", "File paths. Must be part of a repository."),
         new Option("--recursive", "Recursively scans directories"),
     };
+    var deleteSourceFiles = new Command("deletesource", "Deletes the source files for ZipSplit files.")
+    {
+        new Argument<string[]>("path", "Paths to ZipSplit files."),
+        new Option("--recursive", "Recursively scans directories"),
+    };
     var checkoutFiles = new Command("checkout", "Restores the original files from ZipSplit files.")
     {
         new Argument<string[]>("path", "Paths to ZipSplit files."),
@@ -38,6 +43,7 @@ static int Run(string[] args)
     newRepo.Handler = CommandHandler.Create(HandleNewRepo);
     addFiles.Handler = CommandHandler.Create(HandleAddFiles);
     verifyFiles.Handler = CommandHandler.Create(HandleVerifyFiles);
+    deleteSourceFiles.Handler = CommandHandler.Create(HandleDeleteSourceFiles);
     checkoutFiles.Handler = CommandHandler.Create(HandleCheckoutFiles);
 
     var cmd = new RootCommand
@@ -45,6 +51,7 @@ static int Run(string[] args)
         newRepo,
         addFiles,
         verifyFiles,
+        deleteSourceFiles,
         checkoutFiles
     };
     return cmd.Invoke(args);
@@ -224,6 +231,86 @@ static void HandleVerifyFiles(string[] path, bool recursive)
     Console.WriteLine(errors > 0 ? "Errors: " + errors + " files." : "No errors.");
 }
 
+static void HandleDeleteSourceFiles(string[] path, bool recursive)
+{
+    var allFiles = new List<string>();
+    foreach (string file in path)
+    {
+        if (Directory.Exists(file) && recursive)
+        {
+            var dirFiles = Directory.GetFiles(file, "*" + ToolFileExt, SearchOption.AllDirectories);
+            foreach (var dirFile in dirFiles)
+            {
+                if (File.Exists(RemoveToolExt(dirFile)))
+                    allFiles.Add(RemoveToolExt(dirFile));
+            }
+        }
+        else if (file.EndsWith(ToolFileExt))
+        {
+            if (!File.Exists(RemoveToolExt(file)))
+            {
+                Console.WriteLine("Skipping " + file + " since the original file for doesn't exist.");
+                continue;
+            } 
+            allFiles.Add(RemoveToolExt(file));
+        }
+        else if (file.EndsWith(ToolFileExt))
+        {
+            if (!File.Exists(file + ToolFileExt))
+            {
+                Console.WriteLine("Skipping " + file + " since the " + ToolFileExt + " file for doesn't exist.");
+                continue;
+            } 
+            allFiles.Add(file);
+        }
+    }
+
+    int i = 0;
+    foreach (string file in allFiles)
+    {
+        Console.WriteLine("[" + (++i) + "/" + allFiles.Count + "] " + file);
+        
+        var repoPath = FindRepository(file);
+        if (repoPath == null)
+        {
+            Console.WriteLine("Skipping " + file + ": Failed to find repository");
+            continue;
+        }
+
+        try
+        {
+            using var sharedChunkStorage = new DiskDataChunkStorage(Path.Combine(repoPath, RepoChunkDirName), true);
+            var helper = new ZipSplitHelper(sharedChunkStorage);
+
+            using var srcFileStream = File.OpenRead(file);
+            var srcHash = StreamHelper.HashData(srcFileStream, srcFileStream.Length);
+
+            using var receiptFileStream = File.OpenRead(file + ToolFileExt);
+            using var receiptFileBinReader = new BinaryReader(receiptFileStream);
+            
+            using var sha = SHA256.Create();
+            using var stream = new CryptoStream(Stream.Null, sha, CryptoStreamMode.Write);
+            var hash = helper.RestoreOriginalFile(new BinaryReceiptFileReader(receiptFileBinReader), stream, null);
+            stream.FlushFinalBlock();
+            if (sha.Hash!.SequenceEqual(hash) && sha.Hash!.SequenceEqual(srcHash))
+            {
+                File.Delete(file);
+            }
+            else
+            {
+                Console.WriteLine("Error: Verification failed.");
+                Console.WriteLine("Source hash     = " + Convert.ToHexString(srcHash));
+                Console.WriteLine("Original hash   = " + Convert.ToHexString(hash));
+                Console.WriteLine("Calculated hash = " + Convert.ToHexString(sha.Hash!));
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("Error: " + e);
+        }
+    }
+}
+
 static void HandleCheckoutFiles(string[] path, bool recursive)
 {
     var allFiles = new List<string>();
@@ -242,8 +329,7 @@ static void HandleCheckoutFiles(string[] path, bool recursive)
         {
             if (File.Exists(RemoveToolExt(file)))
             {
-                Console.WriteLine("Skipping " + file + " since the " + ToolFileExt +
-                                  " original file for it already exists.");
+                Console.WriteLine("Skipping " + file + " since the original file for it already exists.");
                 continue;
             } 
             allFiles.Add(file);
